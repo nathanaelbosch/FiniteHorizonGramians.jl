@@ -3,6 +3,10 @@ module FiniteHorizonGramians
 using LinearAlgebra
 using PrecompileTools
 
+using SimpleUnPack
+using FastBroadcast
+using Octavian
+
 include("utils.jl")
 
 abstract type AbstractExpAndGramAlgorithm end

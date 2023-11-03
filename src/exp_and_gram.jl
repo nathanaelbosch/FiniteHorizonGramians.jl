@@ -41,12 +41,14 @@ exp_and_gram_chol(
     A::AbstractMatrix{T},
     B::AbstractMatrix{T},
     method::ExpAndGram{T},
-) where {T<:Number} = exp_and_gram_chol!(copy(A), copy(B), method)
+    args...
+) where {T<:Number} = exp_and_gram_chol!(copy(A), copy(B), method, args...)
 
 function exp_and_gram_chol!(
     A::AbstractMatrix{T},
     B::AbstractMatrix{T},
     method::ExpAndGram{T,q},
+    args...
 ) where {T<:Number,q}
 
     n, m = _dims_if_compatible(A::AbstractMatrix, B::AbstractMatrix) # first checks that (A, B) have compatible dimensions
@@ -61,7 +63,7 @@ function exp_and_gram_chol!(
         B ./= convert(T, sqrt(2^si))
     end
 
-    Φ, U = _exp_and_gram_chol_init(A, B, method)
+    Φ, U = _exp_and_gram_chol_init(A, B, method, args...)
 
     # should pre-allocate here
     if s > 0
@@ -83,12 +85,12 @@ function _exp_and_gram_double(Φ0, U0, s)
     tmp = similar(Φ)
     for _ = 1:s
         sub_array = view(pre_array, 1:2m, 1:n)
-        mul!(view(sub_array, 1:m, 1:n), view(U, 1:m, 1:n), Φ')
+        matmul!(view(sub_array, 1:m, 1:n), view(U, 1:m, 1:n), Φ')
         sub_array[m+1:2m, 1:n] .= U[1:m, 1:n]
         m = min(n, 2 * m) # new row-size of U
         U[1:m, 1:n] .= qr!(sub_array).R
 
-        mul!(tmp, Φ, Φ)
+        matmul!(tmp, Φ, Φ)
         Φ .= tmp
     end
     return Φ, U
@@ -129,20 +131,20 @@ function _exp_and_gram_chol_init(
     # initialize zeroth block
     L0 = view(Leven, 1:n, 1:m)
     L0 .= B
-    mul!(L0, P, B, gram_coeffs[1, 3], gram_coeffs[1, 1])
+    matmul!(L0, P, B, gram_coeffs[1, 3], gram_coeffs[1, 1])
 
     # initialize first block (contains only A if deg < 4, else A and A^3)
     L1 = view(Lodd, 1:n, 1:m)
     L1 .= B
-    mul!(L1, P, B, q < 4 ? false : gram_coeffs[2, 4], gram_coeffs[2, 2])
+    matmul!(L1, P, B, q < 4 ? false : gram_coeffs[2, 4], gram_coeffs[2, 2])
 
     # initialize second block (contains only A^2)
     L2 = view(Leven, 1:n, m+1:2m)
-    mul!(L2, P, B, gram_coeffs[3, 3], true)
+    matmul!(L2, P, B, gram_coeffs[3, 3], true)
 
     # initialize third block (contains only A^3)
     L3 = view(Lodd, 1:n, m+1:2m)
-    mul!(L3, P, B, gram_coeffs[4, 4], true)
+    matmul!(L3, P, B, gram_coeffs[4, 4], true)
 
     for k = 2:(div(length(pade_num), 2)-1)
         P *= A2
@@ -152,9 +154,9 @@ function _exp_and_gram_chol_init(
         for i = 0:div(q - 1, 2)
             Leveni = view(Leven, 1:n, i*m+1:(i+1)*m)
             gram_coeffs[2i+1, 2k+1] != 0 &&
-                mul!(Leveni, P, B, gram_coeffs[2i+1, 2k+1], true)
+                matmul!(Leveni, P, B, gram_coeffs[2i+1, 2k+1], true)
             Loddi = view(Lodd, 1:n, i*m+1:(i+1)*m)
-            gram_coeffs[2i+2, 2k+2] != 0 && mul!(Loddi, P, B, gram_coeffs[2i+2, 2k+2], true)
+            gram_coeffs[2i+2, 2k+2] != 0 && matmul!(Loddi, P, B, gram_coeffs[2i+2, 2k+2], true)
         end
     end
 
@@ -174,12 +176,35 @@ function _exp_and_gram_chol_init(
     return expA, U
 end
 
+function get_cache(A, B, method::ExpAndGram{T,13}) where {T}
+    q = 13
+    n, m = size(B)
+    return (
+        A2 = similar(A),
+        A4 = similar(A),
+        A6 = similar(A),
+        tmpA1 = similar(A),
+        tmpA2 = similar(A),
+        tmpA3 = similar(A),
+        L = similar(A, n, m * (q + 1)),
+        tmpB2 = similar(B),
+        A2B = similar(B),
+        A4B = similar(B),
+        A6B = similar(B),
+    )
+end
+
+_exp_and_gram_chol_init(A::AbstractMatrix{T}, B::AbstractMatrix{T}, method::ExpAndGram{T,13}) where {T} =
+    _exp_and_gram_chol_init(A, B, method, get_cache(A, B, method))
+
 
 function _exp_and_gram_chol_init(
     A::AbstractMatrix{T},
     B::AbstractMatrix{T},
     method::ExpAndGram{T,13},
+    cache
 ) where {T}
+    @unpack A2, A4, A6, tmpA1, tmpA2, tmpA3, L, tmpB2, A2B, A4B, A6B = cache
 
     n, m = size(B)
     n == LinearAlgebra.checksquare(A) || throw(
@@ -193,130 +218,133 @@ function _exp_and_gram_chol_init(
     gram_coeffs = method.gram_coeffs
     q = 13
 
-    A2 = A * A
-    A4 = A2 * A2
-    A6 = A2 * A4
-    tmpA1, tmpA2 = similar(A6), similar(A6)
+    # A2 = A * A
+    matmul!(A2, A, A)
+    # A4 = A2 * A2
+    matmul!(A4, A2, A2)
+    # A6 = A2 * A4
+    matmul!(A6, A2, A4)
+    # tmpA1, tmpA2 = similar(A6), similar(A6)
 
-    @. tmpA1 = pade_num[14] * A6 + pade_num[12] * A4 + pade_num[10] * A2
-    @. tmpA2 = pade_num[8] * A6 + pade_num[6] * A4 + pade_num[4] * A2
+    @.. tmpA1 = pade_num[14] * A6 + pade_num[12] * A4 + pade_num[10] * A2
+    @.. tmpA2 = pade_num[8] * A6 + pade_num[6] * A4 + pade_num[4] * A2
     mul!(tmpA2, true, pade_num[2] * I, true, true)
-    U = mul!(tmpA2, A6, tmpA1, true, true)
-    U = mul!(tmpA1, A, U) # U is odd terms
+    U = matmul!(tmpA2, A6, tmpA1, true, true)
+    U = matmul!(tmpA1, A, U) # U is odd terms
 
     #tmpA1 = A # not good
-    tmpA1 = similar(A6) # quick fix
+    # tmpA3 = similar(A6) # quick fix
 
-    @. tmpA1 = pade_num[13] * A6 + pade_num[11] * A4 + pade_num[9] * A2
-    @. tmpA2 = pade_num[7] * A6 + pade_num[5] * A4 + pade_num[3] * A2
+    @.. tmpA3 = pade_num[13] * A6 + pade_num[11] * A4 + pade_num[9] * A2
+    @.. tmpA2 = pade_num[7] * A6 + pade_num[5] * A4 + pade_num[3] * A2
     mul!(tmpA2, true, pade_num[1] * I, true, true)
-    V = mul!(tmpA2, A6, tmpA1, true, true) # V is even terms
+    V = matmul!(tmpA2, A6, tmpA3, true, true) # V is even terms
 
-    @. tmpA1 = V + U # numerator
-    @. tmpA2 = V - U  # denominator
-    num = tmpA1
+    @.. tmpA3 = V + U # numerator
+    @.. tmpA2 = V - U  # denominator
+    num = tmpA3
     den = tmpA2
 
-    L = similar(A, n, m * (q + 1))
+    # L = similar(A, n, m * (q + 1))
 
-    A2B = A2 * B
-    A4B = A4 * B
-    A6B = A6 * B
+    matmul!(A2B, A2, B)
+    matmul!(A4B, A4, B)
+    matmul!(A6B, A6, B)
 
-    tmpB2 = similar(B)
+    # tmpB2 = similar(B)
 
     # L0
     L0 = view(L, 1:n, 1:m)
-    @. L0 = gram_coeffs[1, 3] * A2B + gram_coeffs[1, 5] * A4B + gram_coeffs[1, 7] * A6B # low order terms
+    @.. L0 = gram_coeffs[1, 3] * A2B + gram_coeffs[1, 5] * A4B + gram_coeffs[1, 7] * A6B # low order terms
     mul!(L0, gram_coeffs[1, 1] * I, B, true, true) # add constant term in A
-    @. tmpB2 = gram_coeffs[1, 9] * A2B + gram_coeffs[1, 11] * A4B + gram_coeffs[1, 13] * A6B # high order terms bar factor 6
-    mul!(L0, A6, tmpB2, true, true)
+    @.. tmpB2 = gram_coeffs[1, 9] * A2B + gram_coeffs[1, 11] * A4B + gram_coeffs[1, 13] * A6B # high order terms bar factor 6
+    matmul!(L0, A6, tmpB2, true, true)
 
     # L2
     L2 = view(L, 1:n, 2m+1:3m)
-    @. L2 = gram_coeffs[3, 3] * A2B + gram_coeffs[3, 5] * A4B + gram_coeffs[3, 7] * A6B # low order terms
-    @. tmpB2 = gram_coeffs[3, 9] * A2B + gram_coeffs[3, 11] * A4B + gram_coeffs[3, 13] * A6B # high order terms bar factor 6
-    mul!(L2, A6, tmpB2, true, true)
+    @.. L2 = gram_coeffs[3, 3] * A2B + gram_coeffs[3, 5] * A4B + gram_coeffs[3, 7] * A6B # low order terms
+    @.. tmpB2 = gram_coeffs[3, 9] * A2B + gram_coeffs[3, 11] * A4B + gram_coeffs[3, 13] * A6B # high order terms bar factor 6
+    matmul!(L2, A6, tmpB2, true, true)
 
     # L4
     L4 = view(L, 1:n, 4m+1:5m)
-    @. L4 = gram_coeffs[5, 5] * A4B + gram_coeffs[5, 7] * A6B # low order terms
-    @. tmpB2 = gram_coeffs[5, 9] * A2B + gram_coeffs[5, 11] * A4B + gram_coeffs[5, 13] * A6B # high order terms bar factor 6
-    mul!(L4, A6, tmpB2, true, true)
+    @.. L4 = gram_coeffs[5, 5] * A4B + gram_coeffs[5, 7] * A6B # low order terms
+    @.. tmpB2 = gram_coeffs[5, 9] * A2B + gram_coeffs[5, 11] * A4B + gram_coeffs[5, 13] * A6B # high order terms bar factor 6
+    matmul!(L4, A6, tmpB2, true, true)
 
     # L6
     L6 = view(L, 1:n, 6m+1:7m)
-    @. L6 = gram_coeffs[7, 7] * A6B # low order terms
-    @. tmpB2 = gram_coeffs[7, 9] * A2B + gram_coeffs[7, 11] * A4B + gram_coeffs[7, 13] * A6B # high order terms bar factor 6
-    mul!(L6, A6, tmpB2, true, true)
+    @.. L6 = gram_coeffs[7, 7] * A6B # low order terms
+    @.. tmpB2 = gram_coeffs[7, 9] * A2B + gram_coeffs[7, 11] * A4B + gram_coeffs[7, 13] * A6B # high order terms bar factor 6
+    matmul!(L6, A6, tmpB2, true, true)
 
     # L8
     L8 = view(L, 1:n, 8m+1:9m)
-    @. tmpB2 = gram_coeffs[9, 9] * A2B + gram_coeffs[9, 11] * A4B + gram_coeffs[9, 13] * A6B # high order terms bar factor 6
-    mul!(L8, A6, tmpB2, true, false)
+    @.. tmpB2 = gram_coeffs[9, 9] * A2B + gram_coeffs[9, 11] * A4B + gram_coeffs[9, 13] * A6B # high order terms bar factor 6
+    matmul!(L8, A6, tmpB2, true, false)
 
     # L10
     L10 = view(L, 1:n, 10m+1:11m)
-    @. tmpB2 = gram_coeffs[11, 11] * A4B + gram_coeffs[11, 13] * A6B # high order terms bar factor 6
-    mul!(L10, A6, tmpB2, true, false)
+    @.. tmpB2 = gram_coeffs[11, 11] * A4B + gram_coeffs[11, 13] * A6B # high order terms bar factor 6
+    matmul!(L10, A6, tmpB2, true, false)
 
     # L12
     L12 = view(L, 1:n, 12m+1:13m)
-    @. tmpB2 = gram_coeffs[11, 13] * A6B # high order terms bar factor 6
-    mul!(L12, A6, tmpB2, true, false)
+    @.. tmpB2 = gram_coeffs[11, 13] * A6B # high order terms bar factor 6
+    matmul!(L12, A6, tmpB2, true, false)
 
     # L1
     L1 = view(L, 1:n, m+1:2m)
-    @. L1 = gram_coeffs[2, 4] * A2B + gram_coeffs[2, 6] * A4B + gram_coeffs[2, 8] * A6B # low order terms
+    @.. L1 = gram_coeffs[2, 4] * A2B + gram_coeffs[2, 6] * A4B + gram_coeffs[2, 8] * A6B # low order terms
     mul!(L1, gram_coeffs[2, 2] * I, B, true, true) # add constant term in A
-    @. tmpB2 = gram_coeffs[2, 10] * A2B + gram_coeffs[2, 12] * A4B # high order terms bar factor 6
-    mul!(L1, A6, tmpB2, true, true)
-    mul!(tmpB2, A, L1, true, false)
+    @.. tmpB2 = gram_coeffs[2, 10] * A2B + gram_coeffs[2, 12] * A4B # high order terms bar factor 6
+    matmul!(L1, A6, tmpB2, true, true)
+    matmul!(tmpB2, A, L1, true, false)
     copy!(L1, tmpB2)
 
     # L3
     L3 = view(L, 1:n, 3m+1:4m)
-    @. L3 = gram_coeffs[4, 4] * A2B + gram_coeffs[4, 6] * A4B + gram_coeffs[4, 8] * A6B # low order terms
-    @. tmpB2 = gram_coeffs[4, 10] * A2B + gram_coeffs[4, 12] * A4B # high order terms bar factor 6
-    mul!(L3, A6, tmpB2, true, true)
-    mul!(tmpB2, A, L3, true, false)
+    @.. L3 = gram_coeffs[4, 4] * A2B + gram_coeffs[4, 6] * A4B + gram_coeffs[4, 8] * A6B # low order terms
+    @.. tmpB2 = gram_coeffs[4, 10] * A2B + gram_coeffs[4, 12] * A4B # high order terms bar factor 6
+    matmul!(L3, A6, tmpB2, true, true)
+    matmul!(tmpB2, A, L3, true, false)
     copy!(L3, tmpB2)
 
     # L5
     L5 = view(L, 1:n, 5m+1:6m)
-    @. L5 = gram_coeffs[6, 6] * A4B + gram_coeffs[6, 8] * A6B # low order terms
-    @. tmpB2 = gram_coeffs[6, 10] * A2B + gram_coeffs[6, 12] * A4B # high order terms bar factor 6
-    mul!(L5, A6, tmpB2, true, true)
-    mul!(tmpB2, A, L5, true, false)
+    @.. L5 = gram_coeffs[6, 6] * A4B + gram_coeffs[6, 8] * A6B # low order terms
+    @.. tmpB2 = gram_coeffs[6, 10] * A2B + gram_coeffs[6, 12] * A4B # high order terms bar factor 6
+    matmul!(L5, A6, tmpB2, true, true)
+    matmul!(tmpB2, A, L5, true, false)
     copy!(L5, tmpB2)
 
     # L7
     L7 = view(L, 1:n, 7m+1:8m)
-    @. L7 = gram_coeffs[8, 8] * A6B # low order terms
-    @. tmpB2 = gram_coeffs[8, 10] * A2B + gram_coeffs[8, 12] * A4B # high order terms bar factor 6
-    mul!(L7, A6, tmpB2, true, true)
-    mul!(tmpB2, A, L7, true, false)
+    @.. L7 = gram_coeffs[8, 8] * A6B # low order terms
+    @.. tmpB2 = gram_coeffs[8, 10] * A2B + gram_coeffs[8, 12] * A4B # high order terms bar factor 6
+    matmul!(L7, A6, tmpB2, true, true)
+    matmul!(tmpB2, A, L7, true, false)
     copy!(L7, tmpB2)
 
     # L9
     L9 = view(L, 1:n, 9m+1:10m)
-    @. tmpB2 = gram_coeffs[10, 10] * A2B + gram_coeffs[10, 12] * A4B # high order terms bar factor 6
-    mul!(L9, A6, tmpB2, true, false)
-    mul!(tmpB2, A, L9, true, false)
+    @.. tmpB2 = gram_coeffs[10, 10] * A2B + gram_coeffs[10, 12] * A4B # high order terms bar factor 6
+    matmul!(L9, A6, tmpB2, true, false)
+    matmul!(tmpB2, A, L9, true, false)
     copy!(L9, tmpB2)
 
     # L11
     L11 = view(L, 1:n, 11m+1:12m)
-    @. tmpB2 = gram_coeffs[12, 12] * A4B # high order terms bar factor 6
-    mul!(L11, A6, tmpB2, true, false)
-    mul!(tmpB2, A, L11, true, false)
+    @.. tmpB2 = gram_coeffs[12, 12] * A4B # high order terms bar factor 6
+    matmul!(L11, A6, tmpB2, true, false)
+    matmul!(tmpB2, A, L11, true, false)
     copy!(L11, tmpB2)
 
     # L13
     L13 = view(L, 1:n, 13m+1:14m)
-    @. tmpB2 = gram_coeffs[14, 14] * A6B # high order terms bar factor 6
-    mul!(L13, A6, tmpB2, true, false)
-    mul!(tmpB2, A, L13, true, false)
+    @.. tmpB2 = gram_coeffs[14, 14] * A6B # high order terms bar factor 6
+    matmul!(L13, A6, tmpB2, true, false)
+    matmul!(tmpB2, A, L13, true, false)
     copy!(L13, tmpB2)
 
     F = lu!(den)
